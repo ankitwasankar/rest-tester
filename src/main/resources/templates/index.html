@@ -10,12 +10,14 @@
     <!-- jQuery -->
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <style>
-        /* Additional inline CSS for compactness */
         body { font-size: 0.9rem; }
+        .card { margin-bottom: 1rem; }
+        .card-header, .card-body { padding: 0.5rem 0.75rem; }
         header { margin-bottom: 1rem; }
         h1 { font-size: 1.5rem; }
-        h3 { font-size: 1.05rem; padding: 0px; }
+        h3 { font-size: 1.25rem; }
         .btn { padding: 0.25rem 0.5rem; font-size: 0.8rem; }
+        .form-switch { font-size: 0.8rem; }
     </style>
 </head>
 <body>
@@ -23,60 +25,64 @@
     <header class="mb-2">
         <h1>API Tester</h1>
         <p class="mb-2">Execute API requests defined in YAML files.</p>
-        <div class="d-flex gap-2 mb-2">
+        <div class="d-flex align-items-center gap-2 mb-2">
             <button id="executeAll" class="btn btn-primary btn-sm">Execute All</button>
             <button id="clearLocalStorage" class="btn btn-danger btn-sm">Clear Storage</button>
+            <!-- Skip SSL Toggle -->
+            <div class="form-check form-switch ms-auto">
+                <input class="form-check-input" type="checkbox" id="skipSSL">
+                <label class="form-check-label" for="skipSSL">Skip SSL</label>
+            </div>
         </div>
     </header>
 
     <!-- Each YAML file's data is shown in a compact card -->
-    <div th:each="file : ${files}">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <h3 th:text="${file.fileName}">File Name</h3>
-                <button class="executeFile btn btn-secondary btn-sm" th:data-filename="${file.fileName}">Execute File</button>
-            </div>
-            <div class="card-body p-2">
-                <div class="table-responsive">
-                    <table class="table table-bordered table-sm">
-                        <thead class="table-light">
-                        <tr>
-                            <th>Action</th>
-                            <th>ID</th>
-                            <th>Method</th>
-                            <th>URL</th>
-                            <th>Req Body</th>
-                            <th>Res Body</th>
-                            <th>Status</th>
-                        </tr>
-                        </thead>
-                        <tbody>
-                        <tr th:each="req : ${file.requests}" th:data-requestid="${req.id}">
-                            <td>
-                                <button class="executeRequest btn btn-sm btn-primary"
-                                        th:data-filename="${file.fileName}"
-                                        th:data-requestid="${req.id}">Exec</button>
-                            </td>
-                            <td th:text="${req.id}">ID</td>
-                            <td th:text="${req.method}">Method</td>
-                            <td th:text="${req.url}">URL</td>
-                            <td>
-                                <button class="showRequestBody btn btn-sm btn-info"
-                                        th:data-requestid="${req.id}"
-                                        th:data-body="${req.requestBody}">Show</button>
-                            </td>
-                            <td>
-                                <button class="showResponseBody btn btn-sm btn-info"
-                                        th:data-requestid="${req.id}">Show</button>
-                            </td>
-                            <td class="statusCol" th:text="${req.status}">Not Exec</td>
-                        </tr>
-                        </tbody>
-                    </table>
-                </div>
+    <div th:each="file : ${files}" class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h3 th:text="${file.fileName}">File Name</h3>
+            <button class="executeFile btn btn-secondary btn-sm" th:data-filename="${file.fileName}">
+                Exec File
+            </button>
+        </div>
+        <div class="card-body p-2">
+            <div class="table-responsive">
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                    <tr>
+                        <th>Action</th>
+                        <th>ID</th>
+                        <th>Method</th>
+                        <th>URL</th>
+                        <th>Req Body</th>
+                        <th>Res Body</th>
+                        <th>Status</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    <tr th:each="req : ${file.requests}" th:data-requestid="${req.id}">
+                        <td>
+                            <button class="executeRequest btn btn-sm btn-primary"
+                                    th:data-filename="${file.fileName}"
+                                    th:data-requestid="${req.id}">Exec</button>
+                        </td>
+                        <td th:text="${req.id}">ID</td>
+                        <td th:text="${req.method}">Method</td>
+                        <td th:text="${req.url}">URL</td>
+                        <td>
+                            <button class="showRequestBody btn btn-sm btn-info"
+                                    th:data-requestid="${req.id}"
+                                    th:data-body="${req.requestBody}">Show</button>
+                        </td>
+                        <td>
+                            <button class="showResponseBody btn btn-sm btn-info"
+                                    th:data-requestid="${req.id}">Show</button>
+                        </td>
+                        <td class="statusCol" th:text="${req.status}">Not Exec</td>
+                    </tr>
+                    </tbody>
+                </table>
             </div>
         </div>
-        <br/>
     </div>
 </div>
 
@@ -98,6 +104,7 @@
 <!-- Bootstrap Bundle JS (includes Popper) -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
+    // On document ready, check each row
     $(document).ready(function () {
       $('tr[data-requestid]').each(function () {
         var reqId = $(this).data('requestid');
@@ -113,11 +120,18 @@
       });
     });
 
+    // Get skipSSL value from toggle
+    function getSkipSSL() {
+      return $('#skipSSL').prop('checked');
+    }
+
+    // Execute individual request
     $('.executeRequest').click(function () {
       var fileName = $(this).data('filename');
       var requestId = $(this).data('requestid');
+      var skipSSL = getSkipSSL();
       var button = $(this);
-      $.post('/executeRequest', {fileName: fileName, requestId: requestId}, function (response) {
+      $.post('/executeRequest', {fileName: fileName, requestId: requestId, skipSSL: skipSSL}, function (response) {
         var parsed = JSON.parse(response);
         localStorage.setItem(requestId, response);
         var row = button.closest('tr');
@@ -143,17 +157,20 @@
       });
     });
 
+    // Execute all requests in a file sequentially.
     $('.executeFile').click(function () {
       var fileName = $(this).data('filename');
       var rows = $(this).closest('.card').find('tr[data-requestid]');
       executeRowsSequentially(rows);
     });
 
+    // Execute all requests globally sequentially.
     $('#executeAll').click(function () {
       var allRows = $('tr[data-requestid]');
       executeRowsSequentially(allRows);
     });
 
+    // Sequential execution function.
     function executeRowsSequentially(rows) {
       let i = 0;
       function next() {
@@ -161,7 +178,8 @@
         let row = $(rows[i]);
         let fileName = row.closest('.card').find('.executeFile').data('filename');
         let requestId = row.data('requestid');
-        $.post('/executeRequest', {fileName: fileName, requestId: requestId}, function(response) {
+        let skipSSL = getSkipSSL();
+        $.post('/executeRequest', {fileName: fileName, requestId: requestId, skipSSL: skipSSL}, function(response) {
           var parsed = JSON.parse(response);
           localStorage.setItem(requestId, response);
           row.find('.showResponseBody').show();
@@ -191,6 +209,7 @@
       next();
     }
 
+    // Clear local storage.
     $('#clearLocalStorage').click(function () {
       if (confirm("Clear local storage?")) {
         localStorage.clear();
@@ -199,6 +218,7 @@
       }
     });
 
+    // Show request body in modal.
     $('.showRequestBody').click(function () {
       var requestId = $(this).data('requestid');
       var reqBody = localStorage.getItem("req_" + requestId);
@@ -206,6 +226,7 @@
       new bootstrap.Modal(document.getElementById('bodyModal')).show();
     });
 
+    // Show response body in modal.
     $('.showResponseBody').click(function () {
       var requestId = $(this).data('requestid');
       var stored = localStorage.getItem(requestId);

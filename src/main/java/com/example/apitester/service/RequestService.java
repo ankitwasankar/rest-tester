@@ -2,20 +2,24 @@ package com.example.apitester.service;
 
 import com.example.apitester.model.RequestDefinition;
 import com.example.apitester.model.YamlFileData;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.server.ResponseStatusException;
 import org.yaml.snakeyaml.Yaml;
 import reactor.core.publisher.Mono;
+import reactor.netty.http.client.HttpClient;
 
 import java.io.InputStream;
 import java.util.*;
@@ -30,7 +34,8 @@ public class RequestService {
 
     private final ResourceLoader resourceLoader;
     private final ObjectMapper objectMapper;
-    private final WebClient webClient;
+    // Default WebClient (for normal SSL handling)
+    private final WebClient defaultWebClient;
 
     // In-memory map to store responses keyed by request ID.
     private final Map<String, JsonNode> responses = new HashMap<>();
@@ -41,7 +46,26 @@ public class RequestService {
     public RequestService(ResourceLoader resourceLoader) {
         this.resourceLoader = resourceLoader;
         this.objectMapper = new ObjectMapper();
-        this.webClient = WebClient.create();
+        this.defaultWebClient = WebClient.create();
+    }
+
+    // Helper method to create a WebClient that skips SSL handshake if needed.
+    private WebClient createWebClient(boolean skipSSL) {
+        if (!skipSSL) {
+            return defaultWebClient;
+        }
+        try {
+            SslContext sslContext = SslContextBuilder.forClient()
+                    .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                    .build();
+            HttpClient httpClient = HttpClient.create().secure(spec -> spec.sslContext(sslContext));
+            return WebClient.builder()
+                    .clientConnector(new ReactorClientHttpConnector(httpClient))
+                    .build();
+        } catch (Exception ex) {
+            logger.error("Failed to create insecure WebClient", ex);
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to create insecure WebClient", ex);
+        }
     }
 
     // Dynamically load all YAML files from classpath:requests folder.
@@ -54,10 +78,7 @@ public class RequestService {
             List<Resource> allResources = new ArrayList<>();
             allResources.addAll(Arrays.asList(yamlResources));
             allResources.addAll(Arrays.asList(ymlResources));
-
-            // Sort resources by filename (alphabetically)
             allResources.sort(Comparator.comparing(Resource::getFilename));
-
             for (Resource resource : allResources) {
                 if (resource.exists()) {
                     YamlFileData fileData = loadYamlFile(resource);
@@ -98,7 +119,6 @@ public class RequestService {
                 requests.add(rd);
             }
             fileData.setRequests(requests);
-            // If baseUrl is not provided, set as empty.
             fileData.setBaseUrl("");
         }
         return fileData;
@@ -139,7 +159,7 @@ public class RequestService {
     }
 
     /**
-     * Resolve a single reference (e.g., "op3.response.parentProp.users[0].name") by traversing the stored responses.
+     * Resolve a single reference (e.g., "op3.response.parentProp.users[0].name") by traversing stored responses.
      * Supports array indexing (e.g., users[0]). Throws an error if any field or index is not found.
      */
     private String resolveReferenceValue(String ref) {
@@ -151,7 +171,6 @@ public class RequestService {
         if (!responses.containsKey(refId)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Reference replacement not found for: " + refId);
         }
-        // Ensure the second part is "response"
         if (!"response".equalsIgnoreCase(parts[1])) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Expected 'response' as second part in reference: " + ref);
         }
@@ -197,9 +216,9 @@ public class RequestService {
      * Execute a single request and store its response.
      * Returns a Mono<String> which is a JSON string like:
      * {"statusCode":200, "status": "Executed", "body": "<response body>"}.
-     * On error, a ResponseStatusException is thrown so that the UI receives the proper error.
+     * The 'skipSSL' flag determines whether SSL validation is skipped.
      */
-    public Mono<String> executeRequest(RequestDefinition rd, String baseUrl) {
+    public Mono<String> executeRequest(RequestDefinition rd, String baseUrl, boolean skipSSL) {
         String resolvedUrl;
         String resolvedBody;
         try {
@@ -211,7 +230,6 @@ public class RequestService {
             rd.setResponseBody("");
             return Mono.error(ex);
         }
-
         if (resolvedUrl.contains("{{") || resolvedUrl.contains("}}")) {
             String errMsg = "Reference replacement failed in URL: " + rd.getUrl();
             logger.error(errMsg);
@@ -226,18 +244,17 @@ public class RequestService {
             rd.setResponseBody("");
             return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, errMsg));
         }
-
         if (!resolvedUrl.startsWith("http://") && !resolvedUrl.startsWith("https://")) {
             if (resolvedUrl.startsWith("/")) {
                 resolvedUrl = resolvedUrl.substring(1);
             }
             resolvedUrl = baseUrl + resolvedUrl;
         }
-
         logger.info("Executing Request: ID: {}, Method: {}, URL: {}, Headers: {}, Body: {}",
                 rd.getId(), rd.getMethod(), resolvedUrl, rd.getHeaders(), resolvedBody);
 
-        return webClient.method(org.springframework.http.HttpMethod.valueOf(rd.getMethod().toUpperCase()))
+        WebClient client = createWebClient(skipSSL);
+        return client.method(org.springframework.http.HttpMethod.valueOf(rd.getMethod().toUpperCase()))
                 .uri(resolvedUrl)
                 .headers(httpHeaders -> {
                     if (rd.getHeaders() != null) {
@@ -250,8 +267,7 @@ public class RequestService {
                     return clientResponse.bodyToMono(String.class)
                             .defaultIfEmpty("")
                             .flatMap(body -> {
-                                logger.info("Received Response for Request ID {}: status: {}, body: {}",
-                                        rd.getId(), statusCode, body);
+                                logger.info("Received Response for Request ID {}: status: {}, body: {}", rd.getId(), statusCode, body);
                                 rd.setResponseBody(body);
                                 String statusText;
                                 if (statusCode < 400) {
@@ -266,7 +282,6 @@ public class RequestService {
                                     statusText = "Error: " + statusCode;
                                 }
                                 rd.setStatus(statusText);
-                                // Build JSON result with statusCode, status, and body.
                                 Map<String, Object> resultMap = new HashMap<>();
                                 resultMap.put("statusCode", statusCode);
                                 resultMap.put("status", statusText);
@@ -291,11 +306,7 @@ public class RequestService {
                             ((ResponseStatusException) ex).getStatusCode().value() : HttpStatus.INTERNAL_SERVER_ERROR.value();
                     errorMap.put("statusCode", errorStatus);
                     errorMap.put("status", "Error");
-                    try {
-                        errorMap.put("body", "{\"error\": {\"reason\": \"" + objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(ex) + "\"}}");
-                    } catch (JsonProcessingException e) {
-                        errorMap.put("body", "{\"error\": {\"reason\": \"" + ex.getMessage() + "\"}}");
-                    }
+                    errorMap.put("body", "{\"error\": {\"reason\": \"" + ex.getMessage() + "\"}}");
                     try {
                         String errorResult = objectMapper.writeValueAsString(errorMap);
                         return Mono.just(errorResult);
@@ -306,10 +317,10 @@ public class RequestService {
     }
 
     // Execute all requests in a file (sequentially).
-    public Mono<List<String>> executeFile(YamlFileData fileData) {
+    public Mono<List<String>> executeFile(YamlFileData fileData, boolean skipSSL) {
         List<Mono<String>> monos = new ArrayList<>();
         for (RequestDefinition rd : fileData.getRequests()) {
-            monos.add(executeRequest(rd, fileData.getBaseUrl()));
+            monos.add(executeRequest(rd, fileData.getBaseUrl(), skipSSL));
         }
         return Mono.zip(monos, results ->
                 Arrays.stream(results)
@@ -319,11 +330,11 @@ public class RequestService {
     }
 
     // Execute all requests across all files (sequentially).
-    public Mono<List<String>> executeAll(List<YamlFileData> filesData) {
+    public Mono<List<String>> executeAll(List<YamlFileData> filesData, boolean skipSSL) {
         List<Mono<String>> monos = new ArrayList<>();
         for (YamlFileData fileData : filesData) {
             for (RequestDefinition rd : fileData.getRequests()) {
-                monos.add(executeRequest(rd, fileData.getBaseUrl()));
+                monos.add(executeRequest(rd, fileData.getBaseUrl(), skipSSL));
             }
         }
         return Mono.zip(monos, results ->
