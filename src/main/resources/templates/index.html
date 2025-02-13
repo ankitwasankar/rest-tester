@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>API Tester</title>
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.3/font/bootstrap-icons.css">
+    <!-- jQuery -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <style>
+        body {
+            font-size: 0.8em !important;
+        }
+    </style>
+</head>
+<body>
+<div class="container-fluid py-4">
+    <header class="mb-4">
+        <h1>API Tester</h1>
+        <p>Execute API requests defined in YAML files.</p>
+        <div class="d-flex gap-2">
+            <button id="executeAll" class="btn btn-primary">Execute All Requests</button>
+            <button id="clearLocalStorage" class="btn btn-danger">Clear Local Storage</button>
+        </div>
+    </header>
+
+    <!-- Bootstrap Nav Tabs for YAML Files -->
+    <ul class="nav nav-tabs" id="fileTabs" role="tablist">
+        <li class="nav-item" th:each="file, fileStat : ${files}">
+            <button class="nav-link" th:classappend="${fileStat.index == 0} ? ' active'"
+                    id="tab-[[${file.fileName}]]-tab" data-bs-toggle="tab"
+                    th:data-bs-target="'#tab-'+${file.fileName}" type="button" role="tab"
+                    th:aria-controls="'tab-'+${file.fileName}"
+                    th:aria-selected="${fileStat.index == 0}">
+                <span th:text="${file.fileName}">File Name</span>
+            </button>
+        </li>
+    </ul>
+
+    <div class="tab-content mt-3" id="fileTabsContent">
+        <div class="tab-pane fade" th:each="file, fileStat : ${files}"
+             th:id="'tab-'+${file.fileName}"
+             th:classappend="${fileStat.index == 0} ? ' show active'" role="tabpanel"
+             th:aria-labelledby="'tab-'+${file.fileName}+'-tab'">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h3 th:text="${file.fileName}"></h3>
+                <button class="executeFile btn btn-secondary" th:data-filename="${file.fileName}">
+                    Execute All in File
+                </button>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-bordered">
+                    <thead class="table-light">
+                    <tr>
+                        <th>Action</th>
+                        <th>Request ID</th>
+                        <th>Method</th>
+                        <th>URL</th>
+                        <th>Request Body</th>
+                        <th>Response Body</th>
+                        <th>Status</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    <tr th:each="req : ${file.requests}" th:data-requestid="${req.id}">
+                        <td>
+                            <button class="executeRequest btn btn-sm btn-primary"
+                                    th:data-filename="${file.fileName}"
+                                    th:data-requestid="${req.id}">Execute</button>
+                        </td>
+                        <td th:text="${req.id}">ID</td>
+                        <td th:text="${req.method}">Method</td>
+                        <td th:text="${req.url}">URL</td>
+                        <td>
+                            <button class="showRequestBody btn btn-sm btn-info" th:data-body="${req.requestBody}">
+                                Show
+                            </button>
+                        </td>
+                        <td>
+                            <button class="showResponseBody btn btn-sm btn-info" th:data-requestid="${req.id}">
+                                Show
+                            </button>
+                        </td>
+                        <td class="statusCol" th:text="${req.status}">Not Executed</td>
+                    </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Bootstrap Modal for Request/Response Body -->
+<div class="modal fade" id="bodyModal" tabindex="-1" aria-labelledby="bodyModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="bodyModalLabel">Content</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <pre id="modalContent"></pre>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Bootstrap Bundle JS (includes Popper) -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    // Execute individual request via AJAX
+    $('.executeRequest').click(function () {
+        var fileName = $(this).data('filename');
+        var requestId = $(this).data('requestid');
+        var button = $(this);
+        $.post('/executeRequest', {fileName: fileName, requestId: requestId}, function (response) {
+            // Save response in local storage
+            localStorage.setItem(requestId, response);
+            // Update the status column with icon (assuming response text starting with "Error:" indicates failure)
+            var row = button.closest('tr');
+            var statusCol = row.find('.statusCol');
+            if(response.startsWith("Error:")){
+                statusCol.html('<i class="bi bi-x-circle-fill text-danger"></i>');
+            } else {
+                statusCol.html('<i class="bi bi-check-circle-fill text-success"></i>');
+            }
+        });
+    });
+
+    // Execute all requests in a file via AJAX
+    $('.executeFile').click(function () {
+        var fileName = $(this).data('filename');
+        $.post('/executeFile', {fileName: fileName}, function (response) {
+            alert("Executed all requests in file: " + fileName);
+            // Optionally, update the table for that file
+        });
+    });
+
+    // Execute all requests globally via AJAX
+    $('#executeAll').click(function () {
+        $.post('/executeAll', function (response) {
+            alert("Executed all requests.");
+            // Optionally, update the UI with responses
+        });
+    });
+
+    // Clear local storage button handler
+    $('#clearLocalStorage').click(function () {
+        if (confirm("Are you sure you want to clear local storage?")) {
+            localStorage.clear();
+            alert("Local storage cleared.");
+        }
+    });
+
+    // Show request body in modal (unchanged)
+    $('.showRequestBody').click(function () {
+        var body = $(this).data('body');
+        $('#modalContent').text(body);
+        var modal = new bootstrap.Modal(document.getElementById('bodyModal'));
+        modal.show();
+    });
+
+    // Show response body in modal - retrieve from local storage using request id
+    $('.showResponseBody').click(function () {
+        var requestId = $(this).data('requestid');
+        // If requestId is not directly on the button, try to fetch it from the closest row's data attribute.
+        if(!requestId){
+            requestId = $(this).closest('tr').data('requestid');
+        }
+        var response = localStorage.getItem(requestId);
+        $('#modalContent').text(response ? response : "No response stored.");
+        var modal = new bootstrap.Modal(document.getElementById('bodyModal'));
+        modal.show();
+    });
+</script>
+</body>
+</html>

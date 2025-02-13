@@ -1,0 +1,30 @@
+baseUrl: https://jsonplaceholder.typicode.com/
+requests:
+  - id: createPost
+    method: POST
+    url: posts
+    headers:
+      Content-Type: application/json
+    requestBody: >
+      {
+         "title": "foo",
+         "body": "bar",
+         "userId": 1
+      }
+  - id: updatePost
+    method: PUT
+    url: posts/{{createPost.response.id}}
+    headers:
+      Content-Type: application/json
+    requestBody: >
+      {
+         "id": {{createPost.response.id}},
+         "title": "updated title",
+         "body": "updated body",
+         "userId": 1
+      }
+  - id: deletePost
+    method: DELETE
+    url: posts/{{createPost.response.id}}
+    headers:
+      Accept: application/json

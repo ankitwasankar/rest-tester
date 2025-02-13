@@ -1,0 +1,12 @@
+baseUrl: https://jsonplaceholder.typicode.com/
+requests:
+  - id: getPosts
+    method: GET
+    url: posts
+    headers:
+      Accept: application/json
+  - id: getPost
+    method: GET
+    url: posts/1
+    headers:
+      Accept: application/json
