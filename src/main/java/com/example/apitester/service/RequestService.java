@@ -2,14 +2,20 @@ package com.example.apitester.service;
 
 import com.example.apitester.model.RequestDefinition;
 import com.example.apitester.model.YamlFileData;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.ResourceLoader;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.server.ResponseStatusException;
 import org.yaml.snakeyaml.Yaml;
 import reactor.core.publisher.Mono;
-import org.springframework.web.reactive.function.client.WebClient;
 
 import java.io.InputStream;
 import java.util.*;
@@ -20,15 +26,17 @@ import java.util.stream.Collectors;
 @Service
 public class RequestService {
 
+    private static final Logger logger = LoggerFactory.getLogger(RequestService.class);
+
     private final ResourceLoader resourceLoader;
     private final ObjectMapper objectMapper;
     private final WebClient webClient;
 
-    // In-memory map to store responses keyed by request ID
+    // In-memory map to store responses keyed by request ID.
     private final Map<String, JsonNode> responses = new HashMap<>();
 
-    // Regex to match references like {{op3.response.id}}
-    private static final Pattern REF_PATTERN = Pattern.compile("\\{\\{(\\w+\\.response(?:\\.\\w+)+)\\}\\}");
+    // Pattern to find variables to be replaced: e.g., {{op3.response.parentProp.users[0].name}}
+    private static final Pattern REF_PATTERN = Pattern.compile("\\{\\{([^}]+)\\}\\}");
 
     public RequestService(ResourceLoader resourceLoader) {
         this.resourceLoader = resourceLoader;
@@ -36,28 +44,28 @@ public class RequestService {
         this.webClient = WebClient.create();
     }
 
-    // Load YAML files from "classpath:requests" folder
+    // Dynamically load all YAML files from classpath:requests folder.
     public List<YamlFileData> loadYamlFiles() {
         List<YamlFileData> filesData = new ArrayList<>();
         try {
-            // Use ResourceLoader to get all YAML files from the requests folder.
-            Resource[] resources = new Resource[] {
-                    resourceLoader.getResource("classpath:requests/001-sample.yaml"),
-                    resourceLoader.getResource("classpath:requests/002-sample.yaml")
-            };
-            // (In a real project, you might use a ResourcePatternResolver to load all files dynamically.)
+            PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+            Resource[] yamlResources = resolver.getResources("classpath:requests/*.yaml");
+            Resource[] ymlResources = resolver.getResources("classpath:requests/*.yml");
+            List<Resource> allResources = new ArrayList<>();
+            allResources.addAll(Arrays.asList(yamlResources));
+            allResources.addAll(Arrays.asList(ymlResources));
 
-            // Sort by filename
-            Arrays.sort(resources, Comparator.comparing(Resource::getFilename));
+            // Sort resources by filename (alphabetically)
+            allResources.sort(Comparator.comparing(Resource::getFilename));
 
-            for (Resource resource : resources) {
-                if(resource.exists()){
+            for (Resource resource : allResources) {
+                if (resource.exists()) {
                     YamlFileData fileData = loadYamlFile(resource);
                     filesData.add(fileData);
                 }
             }
         } catch (Exception ex) {
-            ex.printStackTrace();
+            logger.error("Error loading YAML files", ex);
         }
         return filesData;
     }
@@ -69,6 +77,7 @@ public class RequestService {
         Yaml yaml = new Yaml();
         Object data = yaml.load(inputStream);
         if (data instanceof Map) {
+            @SuppressWarnings("unchecked")
             Map<String, Object> map = (Map<String, Object>) data;
             if (map.containsKey("baseUrl") && map.containsKey("requests")) {
                 fileData.setBaseUrl(map.get("baseUrl").toString());
@@ -81,6 +90,7 @@ public class RequestService {
                 fileData.setRequests(requests);
             }
         } else if (data instanceof List) {
+            @SuppressWarnings("unchecked")
             List<Map<String, Object>> reqs = (List<Map<String, Object>>) data;
             List<RequestDefinition> requests = new ArrayList<>();
             for (Map<String, Object> reqMap : reqs) {
@@ -88,7 +98,7 @@ public class RequestService {
                 requests.add(rd);
             }
             fileData.setRequests(requests);
-            // No baseUrl provided in this format; set as empty
+            // If baseUrl is not provided, set as empty.
             fileData.setBaseUrl("");
         }
         return fileData;
@@ -108,84 +118,194 @@ public class RequestService {
         return rd;
     }
 
-    // Resolve references (e.g. {{op3.response.id}}) in a string
+    /**
+     * Resolve references in the input string using regex.
+     * For each variable of the form {{...}}, extract the reference,
+     * use JsonNode traversal (supporting array indexing) to fetch its value from stored responses,
+     * and replace it in the input string.
+     * Throws an error if any reference cannot be resolved.
+     */
     public String resolveReferences(String input) {
-        if(input == null) return null;
+        if (input == null) return null;
         Matcher matcher = REF_PATTERN.matcher(input);
         StringBuffer sb = new StringBuffer();
         while (matcher.find()) {
-            String ref = matcher.group(1); // e.g. op3.response.id
-            String resolved = resolveReference(ref);
-            matcher.appendReplacement(sb, Matcher.quoteReplacement(resolved));
+            String ref = matcher.group(1).trim();  // e.g., "op3.response.parentProp.users[0].name"
+            String replacement = resolveReferenceValue(ref);
+            matcher.appendReplacement(sb, Matcher.quoteReplacement(replacement));
         }
         matcher.appendTail(sb);
         return sb.toString();
     }
 
-    // Resolve a reference using stored responses
-    private String resolveReference(String ref) {
+    /**
+     * Resolve a single reference (e.g., "op3.response.parentProp.users[0].name") by traversing the stored responses.
+     * Supports array indexing (e.g., users[0]). Throws an error if any field or index is not found.
+     */
+    private String resolveReferenceValue(String ref) {
         String[] parts = ref.split("\\.");
-        if (parts.length < 3) return ref;
+        if (parts.length < 3) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid reference format: " + ref);
+        }
         String refId = parts[0];
         if (!responses.containsKey(refId)) {
-            return ref; // Alternatively, return empty string or error message
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Reference replacement not found for: " + refId);
+        }
+        // Ensure the second part is "response"
+        if (!"response".equalsIgnoreCase(parts[1])) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Expected 'response' as second part in reference: " + ref);
         }
         JsonNode node = responses.get(refId);
         for (int i = 2; i < parts.length; i++) {
-            if (node.has(parts[i])) {
-                node = node.get(parts[i]);
+            String part = parts[i];
+            if (part.contains("[")) {
+                int idxStart = part.indexOf('[');
+                int idxEnd = part.indexOf(']');
+                if (idxStart == -1 || idxEnd == -1 || idxEnd < idxStart) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid array notation in reference: " + part);
+                }
+                String field = part.substring(0, idxStart);
+                String indexStr = part.substring(idxStart + 1, idxEnd);
+                int index;
+                try {
+                    index = Integer.parseInt(indexStr);
+                } catch (NumberFormatException ex) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid array index in reference: " + part);
+                }
+                if (!node.has(field)) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Field '" + field + "' not found in response for: " + refId);
+                }
+                node = node.get(field);
+                if (!node.isArray()) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Field '" + field + "' is not an array in response for: " + refId);
+                }
+                if (index >= node.size()) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Index " + index + " out of bounds for field '" + field + "' in response for: " + refId);
+                }
+                node = node.get(index);
             } else {
-                return ref;
+                if (!node.has(part)) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Reference field '" + part + "' not found in response for: " + refId);
+                }
+                node = node.get(part);
             }
         }
         return node.isValueNode() ? node.asText() : node.toString();
     }
 
-    // Execute a single request and store its response
+    /**
+     * Execute a single request and store its response.
+     * Returns a Mono<String> which is a JSON string like:
+     * {"statusCode":200, "status": "Executed", "body": "<response body>"}.
+     * On error, a ResponseStatusException is thrown so that the UI receives the proper error.
+     */
     public Mono<String> executeRequest(RequestDefinition rd, String baseUrl) {
-        // Resolve references in URL and request body
-        String resolvedUrl = resolveReferences(rd.getUrl());
+        String resolvedUrl;
+        String resolvedBody;
+        try {
+            resolvedUrl = resolveReferences(rd.getUrl());
+            resolvedBody = resolveReferences(rd.getRequestBody());
+        } catch (ResponseStatusException ex) {
+            logger.error("Reference replacement error for Request ID {}: {}", rd.getId(), ex.getReason());
+            rd.setStatus("Error: " + ex.getReason());
+            rd.setResponseBody("");
+            return Mono.error(ex);
+        }
+
+        if (resolvedUrl.contains("{{") || resolvedUrl.contains("}}")) {
+            String errMsg = "Reference replacement failed in URL: " + rd.getUrl();
+            logger.error(errMsg);
+            rd.setStatus("Error: " + errMsg);
+            rd.setResponseBody("");
+            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, errMsg));
+        }
+        if (resolvedBody != null && (resolvedBody.contains("{{") || resolvedBody.contains("}}"))) {
+            String errMsg = "Reference replacement failed in request body: " + rd.getRequestBody();
+            logger.error(errMsg);
+            rd.setStatus("Error: " + errMsg);
+            rd.setResponseBody("");
+            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, errMsg));
+        }
+
         if (!resolvedUrl.startsWith("http://") && !resolvedUrl.startsWith("https://")) {
             if (resolvedUrl.startsWith("/")) {
                 resolvedUrl = resolvedUrl.substring(1);
             }
             resolvedUrl = baseUrl + resolvedUrl;
         }
-        String resolvedBody = resolveReferences(rd.getRequestBody());
 
-        WebClient.RequestBodySpec requestSpec = webClient.method(org.springframework.http.HttpMethod.valueOf(rd.getMethod().toUpperCase()))
-                .uri(resolvedUrl);
-        if (rd.getHeaders() != null) {
-            for (Map.Entry<String, String> entry : rd.getHeaders().entrySet()) {
-                requestSpec = requestSpec.header(entry.getKey(), entry.getValue());
-            }
-        }
+        logger.info("Executing Request: ID: {}, Method: {}, URL: {}, Headers: {}, Body: {}",
+                rd.getId(), rd.getMethod(), resolvedUrl, rd.getHeaders(), resolvedBody);
 
-        Mono<String> responseMono;
-        if (Arrays.asList("POST", "PUT", "PATCH").contains(rd.getMethod().toUpperCase())) {
-            responseMono = requestSpec.bodyValue(resolvedBody != null ? resolvedBody : "").retrieve()
-                    .bodyToMono(String.class);
-        } else {
-            responseMono = requestSpec.retrieve().bodyToMono(String.class);
-        }
-
-        return responseMono.doOnNext(response -> {
-            rd.setResponseBody(response);
-            rd.setStatus("Executed");
-            try {
-                JsonNode jsonNode = objectMapper.readTree(response);
-                responses.put(rd.getId(), jsonNode);
-            } catch (Exception ex) {
-                // If response is not valid JSON, skip storing
-            }
-        }).onErrorResume(ex -> {
-            rd.setStatus("Error: " + ex.getMessage());
-            rd.setResponseBody("");
-            return Mono.just("Error: " + ex.getMessage());
-        });
+        return webClient.method(org.springframework.http.HttpMethod.valueOf(rd.getMethod().toUpperCase()))
+                .uri(resolvedUrl)
+                .headers(httpHeaders -> {
+                    if (rd.getHeaders() != null) {
+                        rd.getHeaders().forEach(httpHeaders::add);
+                    }
+                })
+                .bodyValue(resolvedBody != null ? resolvedBody : "")
+                .exchangeToMono(clientResponse -> {
+                    int statusCode = clientResponse.statusCode().value();
+                    return clientResponse.bodyToMono(String.class)
+                            .defaultIfEmpty("")
+                            .flatMap(body -> {
+                                logger.info("Received Response for Request ID {}: status: {}, body: {}",
+                                        rd.getId(), statusCode, body);
+                                rd.setResponseBody(body);
+                                String statusText;
+                                if (statusCode < 400) {
+                                    statusText = "Executed";
+                                    try {
+                                        JsonNode jsonNode = objectMapper.readTree(body);
+                                        responses.put(rd.getId(), jsonNode);
+                                    } catch (Exception ex) {
+                                        logger.error("Failed to parse JSON response for Request ID " + rd.getId(), ex);
+                                    }
+                                } else {
+                                    statusText = "Error: " + statusCode;
+                                }
+                                rd.setStatus(statusText);
+                                // Build JSON result with statusCode, status, and body.
+                                Map<String, Object> resultMap = new HashMap<>();
+                                resultMap.put("statusCode", statusCode);
+                                resultMap.put("status", statusText);
+                                resultMap.put("body", body);
+                                try {
+                                    String resultStr = objectMapper.writeValueAsString(resultMap);
+                                    return Mono.just(resultStr);
+                                } catch (Exception ex) {
+                                    return Mono.error(new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Error processing response", ex));
+                                }
+                            });
+                })
+                .doOnError(ex -> {
+                    String errorMsg = "Error executing request " + rd.getId() + ": " + ex.getMessage();
+                    logger.error(errorMsg, ex);
+                    rd.setStatus("Error: " + ex.getMessage());
+                    rd.setResponseBody("");
+                })
+                .onErrorResume(ex -> {
+                    Map<String, Object> errorMap = new HashMap<>();
+                    int errorStatus = (ex instanceof ResponseStatusException) ?
+                            ((ResponseStatusException) ex).getStatusCode().value() : HttpStatus.INTERNAL_SERVER_ERROR.value();
+                    errorMap.put("statusCode", errorStatus);
+                    errorMap.put("status", "Error");
+                    try {
+                        errorMap.put("body", "{\"error\": {\"reason\": \"" + objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(ex) + "\"}}");
+                    } catch (JsonProcessingException e) {
+                        errorMap.put("body", "{\"error\": {\"reason\": \"" + ex.getMessage() + "\"}}");
+                    }
+                    try {
+                        String errorResult = objectMapper.writeValueAsString(errorMap);
+                        return Mono.just(errorResult);
+                    } catch (Exception e) {
+                        return Mono.error(e);
+                    }
+                });
     }
 
-    // Execute all requests in a file (sequentially)
+    // Execute all requests in a file (sequentially).
     public Mono<List<String>> executeFile(YamlFileData fileData) {
         List<Mono<String>> monos = new ArrayList<>();
         for (RequestDefinition rd : fileData.getRequests()) {
@@ -198,7 +318,7 @@ public class RequestService {
         );
     }
 
-    // Execute all requests across all files (sequentially)
+    // Execute all requests across all files (sequentially).
     public Mono<List<String>> executeAll(List<YamlFileData> filesData) {
         List<Mono<String>> monos = new ArrayList<>();
         for (YamlFileData fileData : filesData) {
@@ -213,7 +333,7 @@ public class RequestService {
         );
     }
 
-    // Clear stored responses
+    // Clear stored responses.
     public void clearResponses() {
         responses.clear();
     }

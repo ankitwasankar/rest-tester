@@ -1,6 +1,6 @@
 baseUrl: https://jsonplaceholder.typicode.com/
 requests:
-  - id: createPost
+  - id: createPost01
     method: POST
     url: posts
     headers:
@@ -11,20 +11,20 @@ requests:
          "body": "bar",
          "userId": 1
       }
-  - id: updatePost
+  - id: updatePost02
     method: PUT
-    url: posts/{{createPost.response.id}}
+    url: posts/{{createPost01.response.id}}
     headers:
       Content-Type: application/json
     requestBody: >
       {
-         "id": {{createPost.response.id}},
+         "id": {{createPost01.response.id}},
          "title": "updated title",
          "body": "updated body",
          "userId": 1
       }
-  - id: deletePost
+  - id: deletePost03
     method: DELETE
-    url: posts/{{createPost.response.id}}
+    url: posts/{{createPost01.response.id}}
     headers:
       Accept: application/json
